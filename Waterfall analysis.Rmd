@@ -1,0 +1,90 @@
+---
+title: "Task"
+author: "Oksana Laputskaya"
+date: "28 10 2018"
+output: html_document
+---
+
+###1. Download data:
+
+```{r}
+library("httr")
+library("ggplot2")
+library("dplyr")
+token <- httr::add_headers(Authorization = paste0("Bearer ", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoidGVzdF91c2VyIn0.NTIgzXIJH8epx2l5X51vUZCHBovvF4oqf9SimWHVJQE"))
+prices<-GET("http://quest.ad.wazzapps.org/prices", token)
+prices1<-parsed_content(prices)
+prices<-as.data.frame(matrix(unlist(prices1),ncol=length(prices1[[1]]),byrow=T),stringsAsFactors=F)
+names(prices)<-names(prices1[[1]])
+stats<-GET("http://quest.ad.wazzapps.org/stats", token)
+stats1<-parsed_content(stats)
+stats<-as.data.frame(matrix(unlist(stats1),ncol=length(stats1[[1]]),byrow=T),stringsAsFactors=F)
+names(stats)<-names(stats1[[1]])
+prices$price<-as.double(prices$price)
+stats$requests<-as.double(stats$requests)
+stats$impressions<-as.double(stats$impressions)
+head(prices)
+head(stats)
+```
+###2. First sight analyse
+
+Let's take a look on waterfall's model:
+
+```{r}
+prices1<-left_join(prices,stats,by="req_id")
+prices1<-prices1%>%arrange(desc(price),desc(requests))
+prices1$requests_further<-prices1$requests-prices1$impressions
+for(i in 2:NROW(prices1)) prices1$errors[i]<-prices1$requests[i]-prices1$requests_further[i-1]
+prices1$position<-as.numeric(prices1$position)
+prices1$fill_rate<-prices1$impressions/prices1$requests
+prices1
+```
+
+We see that there are no nominal losses, and that all requests from the previous iteration are sent with lower prices to the same (and then another) network. 
+
+To check for dependencies, we construct a graph matrix:
+
+```{r}
+GGally::ggpairs(prices1[,c(3,4,7,8)])
+```
+
+We can see high negative correlation (>-0.7) between impressions и requests, so these two parameters have strong negative relationship and high possitive coef. between requests and price (as in definition of waterfall model) 
+
+
+To see dependance between impressions and price, let's make bubble_chart with posisions:
+```{r}
+ggplot(prices1, aes(x=position,y=impressions,size=price,color=impressions))+geom_point()+stat_smooth(method = "auto", se = T)+scale_colour_gradientn(colours = topo.colors(5))+ggtitle("Function for impressions from price and waterfal's position")
+```
+
+You can notice that in relation to the step in the waterfall, a tendency becomes clear: with the price falling to a minimum, a strong increase in impressions is noticeable. 
+
+Now let's see what share each network occupies in the total volume of Impressions:
+
+```{r}
+ggplot(prices1, aes(impressions, ..count.., fill = ad_network)) +geom_density(position = "fill")
+```
+
+It is very noticeable that most of the impressions fall on 1st ads network, impressions on other networks are not comparable in number. Let's see if there is a dependence of Impressions on the price of networks, it can logically be assumed that the dependence is linear, i.e. the higher the price, the less advertising the network has at this price, so we will draw graphs of generalized linear regression for each network for clarity, taking into account the standard deviation.Let's take the logarithmic scale horizontally and vertically, because the spread of values in Impressions and price is large enough:
+
+```{r}
+ggplot(prices1, aes(x = impressions, y = price, col = ad_network)) +
+geom_point() +stat_smooth(method = "glm", se = T)+scale_y_log10()+scale_x_log10()
+```
+
+###3. Aggregation of data by network.
+
+For convenience, we will consider together the statistics of campaigns in relation to prices and calculate the main metrics that can be built from the source data:*fillrate, eCPM, Revenue*
+
+```{r}
+data<-left_join(stats,prices, by="req_id")%>%group_by(ad_network)%>%summarize(Total_prices=sum(price,na.rm=T),Impressions=sum(impressions,na.rm=T),Requests=sum(requests,na.rm=T),n=n())
+data<-data%>%mutate(fillrate=Impressions/Requests,eCPM=Total_prices/Impressions*1000,Revenue=eCPM*fillrate)%>%arrange(desc(Revenue))
+data
+```
+
+As expected, Network 1 had the highest Revenue, but due to the large eCPM Revenue, Network 2 was only 29% lower than Network 1, although Network 1 had Impressions almost 13 times larger.
+
+###4. Conclusions
+
+1. Based on the total profitability of the networks and the aggregated Revenue, I would recommend, within the framework of A / B testing, to change the priority of the request in the waterfall for networks 3 and 4, because with fewer requests there are a total of more Impressions, respectively higher than Revenue. Or even try to put 4 network in place 2, because a total of 4 networks brought with the current structure more impressions than the others, and there is a non-zero probability that when the network is raised, impressions and revenue will increase.
+
+2. Many articles and cases on the practical monetization of mobile applications agree that the waterfall for publishers requires frequent optimization, with almost all changes aimed at obtaining historical prices to maximize future monetization. Intermediary platforms have solved this problem with the help of automated price optimization tools, but, useful in operational terms, such tools do not take into account the competitiveness of the waterfall, when the demand partner may be ready to pay a higher price in real time for the right amount of impressions. If you rely on historical prices, you can skip the emergence of a new highly profitable company in one of the lower networks, and thereby lose revenue. To avoid this, many meditation platforms introduce the concept of minimum price. Reliance on adding ad units at the lowest price allows ad networks to place ad bids based on the value of the ad itself to fall into a waterfall, and not just based on the historical effectiveness of the network.
